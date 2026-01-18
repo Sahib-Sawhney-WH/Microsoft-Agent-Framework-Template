@@ -1,0 +1,105 @@
+# =============================================================================
+# Ingress - External traffic routing
+# =============================================================================
+# Choose ONE ingress configuration based on your cluster setup:
+# - Option 1: NGINX Ingress Controller (generic)
+# - Option 2: Azure Application Gateway Ingress Controller (AKS)
+# =============================================================================
+
+# =============================================================================
+# Option 1: NGINX Ingress Controller
+# =============================================================================
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: msft-agent
+  namespace: msft-agent
+  labels:
+    app.kubernetes.io/name: msft-agent
+    app.kubernetes.io/component: ingress
+  annotations:
+    # NGINX specific annotations
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+
+    # Rate limiting (optional)
+    nginx.ingress.kubernetes.io/limit-rps: "10"
+    nginx.ingress.kubernetes.io/limit-connections: "5"
+
+    # TLS with cert-manager
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+
+    # CORS (if needed for web clients)
+    # nginx.ingress.kubernetes.io/enable-cors: "true"
+    # nginx.ingress.kubernetes.io/cors-allow-origin: "https://your-frontend.com"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - agent.example.com
+      secretName: msft-agent-tls
+  rules:
+    - host: agent.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: msft-agent
+                port:
+                  number: 80
+
+---
+# =============================================================================
+# Option 2: Azure Application Gateway Ingress Controller (AKS)
+# =============================================================================
+# Uncomment to use with AGIC instead of NGINX
+# =============================================================================
+# apiVersion: networking.k8s.io/v1
+# kind: Ingress
+# metadata:
+#   name: msft-agent-agic
+#   namespace: msft-agent
+#   annotations:
+#     kubernetes.io/ingress.class: azure/application-gateway
+#     appgw.ingress.kubernetes.io/ssl-redirect: "true"
+#     appgw.ingress.kubernetes.io/connection-draining: "true"
+#     appgw.ingress.kubernetes.io/connection-draining-timeout: "30"
+#     appgw.ingress.kubernetes.io/request-timeout: "300"
+#     # WAF policy (if using WAF_v2 SKU)
+#     # appgw.ingress.kubernetes.io/waf-policy-for-path: "/subscriptions/.../webApplicationFirewallPolicies/policy"
+# spec:
+#   tls:
+#     - hosts:
+#         - agent.example.com
+#       secretName: msft-agent-tls
+#   rules:
+#     - host: agent.example.com
+#       http:
+#         paths:
+#           - path: /
+#             pathType: Prefix
+#             backend:
+#               service:
+#                 name: msft-agent
+#                 port:
+#                   number: 80
+
+---
+# =============================================================================
+# TLS Certificate (for development/testing without cert-manager)
+# =============================================================================
+# For production, use cert-manager with Let's Encrypt or Azure Key Vault
+# =============================================================================
+# apiVersion: v1
+# kind: Secret
+# metadata:
+#   name: msft-agent-tls
+#   namespace: msft-agent
+# type: kubernetes.io/tls
+# data:
+#   tls.crt: <base64-encoded-cert>
+#   tls.key: <base64-encoded-key>

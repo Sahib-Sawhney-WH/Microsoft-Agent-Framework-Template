@@ -1,0 +1,103 @@
+# =============================================================================
+# HorizontalPodAutoscaler - Auto-scaling based on resource utilization
+# =============================================================================
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: msft-agent
+  namespace: msft-agent
+  labels:
+    app.kubernetes.io/name: msft-agent
+    app.kubernetes.io/component: autoscaler
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: msft-agent
+
+  # Replica bounds
+  minReplicas: 2
+  maxReplicas: 10
+
+  # Scaling metrics
+  metrics:
+    # Scale based on CPU utilization
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+
+    # Scale based on memory utilization
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+
+    # Custom metrics (requires metrics-server and custom metrics adapter)
+    # Scale based on requests per second
+    # - type: Pods
+    #   pods:
+    #     metric:
+    #       name: http_requests_per_second
+    #     target:
+    #       type: AverageValue
+    #       averageValue: "100"
+
+  # Scaling behavior
+  behavior:
+    # Scale down slowly to avoid flapping
+    scaleDown:
+      stabilizationWindowSeconds: 300  # Wait 5 min before scaling down
+      policies:
+        - type: Percent
+          value: 10  # Reduce by max 10% per period
+          periodSeconds: 60
+        - type: Pods
+          value: 1  # Reduce by max 1 pod per period
+          periodSeconds: 60
+      selectPolicy: Min  # Use the most conservative policy
+
+    # Scale up quickly to handle load spikes
+    scaleUp:
+      stabilizationWindowSeconds: 0  # Scale up immediately
+      policies:
+        - type: Percent
+          value: 100  # Can double capacity per period
+          periodSeconds: 15
+        - type: Pods
+          value: 4  # Add up to 4 pods per period
+          periodSeconds: 15
+      selectPolicy: Max  # Use the most aggressive policy
+
+---
+# =============================================================================
+# Vertical Pod Autoscaler (Optional - requires VPA installation)
+# =============================================================================
+# Automatically adjusts resource requests/limits based on actual usage
+# =============================================================================
+# apiVersion: autoscaling.k8s.io/v1
+# kind: VerticalPodAutoscaler
+# metadata:
+#   name: msft-agent
+#   namespace: msft-agent
+# spec:
+#   targetRef:
+#     apiVersion: "apps/v1"
+#     kind: Deployment
+#     name: msft-agent
+#   updatePolicy:
+#     updateMode: "Auto"  # or "Off" for recommendation-only mode
+#   resourcePolicy:
+#     containerPolicies:
+#       - containerName: agent
+#         minAllowed:
+#           cpu: "250m"
+#           memory: "512Mi"
+#         maxAllowed:
+#           cpu: "4"
+#           memory: "8Gi"
+#         controlledResources: ["cpu", "memory"]

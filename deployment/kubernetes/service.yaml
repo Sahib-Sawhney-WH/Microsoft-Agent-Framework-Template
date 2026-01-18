@@ -1,0 +1,46 @@
+# =============================================================================
+# Service - Internal cluster networking
+# =============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: msft-agent
+  namespace: msft-agent
+  labels:
+    app.kubernetes.io/name: msft-agent
+    app.kubernetes.io/component: agent
+  annotations:
+    # Prometheus scraping (if using Prometheus Operator)
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "9090"
+    prometheus.io/path: "/metrics"
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      protocol: TCP
+    - name: metrics
+      port: 9090
+      targetPort: 9090
+      protocol: TCP
+  selector:
+    app: msft-agent
+---
+# =============================================================================
+# Service - Headless service for StatefulSet (if needed)
+# =============================================================================
+# apiVersion: v1
+# kind: Service
+# metadata:
+#   name: msft-agent-headless
+#   namespace: msft-agent
+# spec:
+#   type: ClusterIP
+#   clusterIP: None
+#   ports:
+#     - name: http
+#       port: 8080
+#   selector:
+#     app: msft-agent

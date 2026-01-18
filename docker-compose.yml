@@ -1,0 +1,145 @@
+# =============================================================================
+# MSFT Agent Framework - Docker Compose Configuration
+# =============================================================================
+# Local development environment with Redis cache and Jaeger tracing.
+#
+# Usage:
+#   docker-compose up -d          # Start all services
+#   docker-compose up agent       # Start agent only (with dependencies)
+#   docker-compose logs -f agent  # Follow agent logs
+#   docker-compose down           # Stop all services
+#   docker-compose down -v        # Stop and remove volumes
+#
+# Services:
+#   - agent: AI Assistant service (port 8080)
+#   - redis: Session cache (port 6379)
+#   - jaeger: Distributed tracing UI (port 16686)
+#
+# =============================================================================
+
+version: "3.8"
+
+services:
+  # ===========================================================================
+  # AI Agent Service
+  # ===========================================================================
+  agent:
+    build:
+      context: .
+      dockerfile: deployment/Dockerfile
+    container_name: msft-agent
+    ports:
+      - "8080:8080"
+    environment:
+      # Azure OpenAI (required - set these in .env or pass directly)
+      - AZURE_OPENAI_ENDPOINT=${AZURE_OPENAI_ENDPOINT}
+      - AZURE_OPENAI_DEPLOYMENT=${AZURE_OPENAI_DEPLOYMENT:-gpt-4o}
+      - AZURE_OPENAI_API_VERSION=${AZURE_OPENAI_API_VERSION:-2024-10-01-preview}
+
+      # Azure Authentication (for production - uses DefaultAzureCredential)
+      - AZURE_CLIENT_ID=${AZURE_CLIENT_ID:-}
+      - AZURE_TENANT_ID=${AZURE_TENANT_ID:-}
+      - AZURE_CLIENT_SECRET=${AZURE_CLIENT_SECRET:-}
+
+      # Redis Cache (use local container)
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_SSL=false
+      - REDIS_TTL=${REDIS_TTL:-3600}
+      - REDIS_PREFIX=${REDIS_PREFIX:-chat:}
+
+      # Observability
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
+      - OTEL_SERVICE_NAME=${OTEL_SERVICE_NAME:-ai-assistant}
+      - JAEGER_ENDPOINT=http://jaeger:6831
+
+      # Application
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+    depends_on:
+      redis:
+        condition: service_healthy
+      jaeger:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    networks:
+      - agent-network
+    volumes:
+      # Mount config for development (optional - remove in production)
+      - ./config:/app/config:ro
+
+  # ===========================================================================
+  # Redis Cache (Session Management)
+  # ===========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: msft-agent-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - agent-network
+    volumes:
+      - redis-data:/data
+
+  # ===========================================================================
+  # Jaeger (Distributed Tracing)
+  # ===========================================================================
+  jaeger:
+    image: jaegertracing/all-in-one:1.53
+    container_name: msft-agent-jaeger
+    ports:
+      - "16686:16686"  # Jaeger UI
+      - "4317:4317"    # OTLP gRPC
+      - "4318:4318"    # OTLP HTTP
+      - "6831:6831/udp" # Jaeger Thrift
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+      - LOG_LEVEL=info
+    restart: unless-stopped
+    networks:
+      - agent-network
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  agent-network:
+    driver: bridge
+
+# =============================================================================
+# Volumes
+# =============================================================================
+volumes:
+  redis-data:
+    driver: local
+
+# =============================================================================
+# Development Profiles
+# =============================================================================
+# Use profiles to start subsets of services:
+#   docker-compose --profile dev up      # Agent + Redis + Jaeger
+#   docker-compose --profile infra up    # Redis + Jaeger only
+#
+# Example with profiles (uncomment to enable):
+#
+# services:
+#   agent:
+#     profiles: ["dev"]
+#   redis:
+#     profiles: ["dev", "infra"]
+#   jaeger:
+#     profiles: ["dev", "infra"]

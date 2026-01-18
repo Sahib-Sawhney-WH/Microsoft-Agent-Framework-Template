@@ -1,0 +1,33 @@
+# =============================================================================
+# ConfigMap - Non-sensitive configuration values
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: msft-agent-config
+  namespace: msft-agent
+  labels:
+    app.kubernetes.io/name: msft-agent
+    app.kubernetes.io/component: config
+data:
+  # Azure OpenAI Settings
+  AZURE_OPENAI_DEPLOYMENT: "gpt-4o"
+  AZURE_OPENAI_API_VERSION: "2024-10-01-preview"
+
+  # Application Settings
+  LOG_LEVEL: "INFO"
+  ENVIRONMENT: "production"
+
+  # Redis Cache Settings
+  REDIS_PORT: "6380"
+  REDIS_SSL: "true"
+  REDIS_TTL: "3600"
+  REDIS_PREFIX: "chat:"
+
+  # Observability Settings
+  OTEL_SERVICE_NAME: "msft-agent"
+  OTEL_EXPORTER_OTLP_PROTOCOL: "grpc"
+
+  # Security Settings
+  RATE_LIMIT_REQUESTS_PER_MINUTE: "60"
+  RATE_LIMIT_TOKENS_PER_MINUTE: "100000"

@@ -1,0 +1,235 @@
+# =============================================================================
+# Continuous Deployment Pipeline
+# =============================================================================
+# Deploys to staging on push to main, production on release.
+# Uses Azure Container Registry and Azure Kubernetes Service.
+# =============================================================================
+
+name: CD
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+      - '.github/ISSUE_TEMPLATE/**'
+  release:
+    types: [published]
+
+env:
+  AZURE_CONTAINER_REGISTRY: myregistry.azurecr.io
+  IMAGE_NAME: msft-agent
+  AKS_CLUSTER_NAME: msft-agent-aks
+  AKS_RESOURCE_GROUP: msft-agent-rg
+  NAMESPACE_STAGING: msft-agent-staging
+  NAMESPACE_PRODUCTION: msft-agent
+
+jobs:
+  # ===========================================================================
+  # Build and Push to Azure Container Registry
+  # ===========================================================================
+  build:
+    name: Build & Push
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.version }}
+      image_digest: ${{ steps.build.outputs.digest }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Azure Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.AZURE_CONTAINER_REGISTRY }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.AZURE_CONTAINER_REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: deployment/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=${{ env.AZURE_CONTAINER_REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache
+          cache-to: type=registry,ref=${{ env.AZURE_CONTAINER_REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache,mode=max
+          platforms: linux/amd64
+
+  # ===========================================================================
+  # Deploy to Staging
+  # ===========================================================================
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment:
+      name: staging
+      url: https://agent-staging.example.com
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Set AKS context
+        uses: azure/aks-set-context@v4
+        with:
+          cluster-name: ${{ env.AKS_CLUSTER_NAME }}
+          resource-group: ${{ env.AKS_RESOURCE_GROUP }}
+
+      - name: Create/Update namespace
+        run: |
+          kubectl apply -f deployment/kubernetes/namespace.yaml
+          kubectl label namespace ${{ env.NAMESPACE_STAGING }} environment=staging --overwrite || true
+
+      - name: Deploy ConfigMap and Secrets
+        run: |
+          kubectl apply -f deployment/kubernetes/configmap.yaml -n ${{ env.NAMESPACE_STAGING }}
+          # Note: Secrets should be managed via Azure Key Vault or external-secrets
+
+      - name: Deploy application
+        run: |
+          # Update image tag in deployment
+          kubectl set image deployment/msft-agent \
+            agent=${{ env.AZURE_CONTAINER_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build.outputs.image_tag }} \
+            -n ${{ env.NAMESPACE_STAGING }} \
+            || kubectl apply -f deployment/kubernetes/deployment.yaml -n ${{ env.NAMESPACE_STAGING }}
+
+          kubectl apply -f deployment/kubernetes/service.yaml -n ${{ env.NAMESPACE_STAGING }}
+          kubectl apply -f deployment/kubernetes/hpa.yaml -n ${{ env.NAMESPACE_STAGING }}
+
+      - name: Wait for rollout
+        run: |
+          kubectl rollout status deployment/msft-agent -n ${{ env.NAMESPACE_STAGING }} --timeout=300s
+
+      - name: Verify deployment
+        run: |
+          kubectl get pods -n ${{ env.NAMESPACE_STAGING }} -l app=msft-agent
+          kubectl get svc -n ${{ env.NAMESPACE_STAGING }}
+
+      - name: Run smoke tests
+        run: |
+          # Port forward and run basic health check
+          kubectl port-forward svc/msft-agent 8080:80 -n ${{ env.NAMESPACE_STAGING }} &
+          sleep 5
+          curl -f http://localhost:8080/health || exit 1
+
+  # ===========================================================================
+  # Deploy to Production
+  # ===========================================================================
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name == 'release'
+    environment:
+      name: production
+      url: https://agent.example.com
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Set AKS context
+        uses: azure/aks-set-context@v4
+        with:
+          cluster-name: ${{ env.AKS_CLUSTER_NAME }}
+          resource-group: ${{ env.AKS_RESOURCE_GROUP }}
+
+      - name: Deploy to Production
+        run: |
+          # Apply all manifests
+          kubectl apply -f deployment/kubernetes/namespace.yaml
+          kubectl apply -f deployment/kubernetes/configmap.yaml -n ${{ env.NAMESPACE_PRODUCTION }}
+          kubectl apply -f deployment/kubernetes/deployment.yaml -n ${{ env.NAMESPACE_PRODUCTION }}
+          kubectl apply -f deployment/kubernetes/service.yaml -n ${{ env.NAMESPACE_PRODUCTION }}
+          kubectl apply -f deployment/kubernetes/hpa.yaml -n ${{ env.NAMESPACE_PRODUCTION }}
+          kubectl apply -f deployment/kubernetes/ingress.yaml -n ${{ env.NAMESPACE_PRODUCTION }}
+
+          # Update to release version
+          kubectl set image deployment/msft-agent \
+            agent=${{ env.AZURE_CONTAINER_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.event.release.tag_name }} \
+            -n ${{ env.NAMESPACE_PRODUCTION }}
+
+      - name: Wait for rollout
+        run: |
+          kubectl rollout status deployment/msft-agent -n ${{ env.NAMESPACE_PRODUCTION }} --timeout=600s
+
+      - name: Verify deployment
+        run: |
+          kubectl get pods -n ${{ env.NAMESPACE_PRODUCTION }} -l app=msft-agent
+          kubectl describe deployment msft-agent -n ${{ env.NAMESPACE_PRODUCTION }}
+
+      - name: Post-deployment notification
+        if: success()
+        uses: slackapi/slack-github-action@v1
+        with:
+          channel-id: 'deployments'
+          slack-message: |
+            :rocket: *Production Deployment Successful*
+            *Version:* ${{ github.event.release.tag_name }}
+            *Release:* ${{ github.event.release.html_url }}
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+
+  # ===========================================================================
+  # Rollback (Manual trigger)
+  # ===========================================================================
+  rollback:
+    name: Rollback
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    environment:
+      name: production
+
+    steps:
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Set AKS context
+        uses: azure/aks-set-context@v4
+        with:
+          cluster-name: ${{ env.AKS_CLUSTER_NAME }}
+          resource-group: ${{ env.AKS_RESOURCE_GROUP }}
+
+      - name: Rollback deployment
+        run: |
+          kubectl rollout undo deployment/msft-agent -n ${{ env.NAMESPACE_PRODUCTION }}
+          kubectl rollout status deployment/msft-agent -n ${{ env.NAMESPACE_PRODUCTION }} --timeout=300s
+
+      - name: Verify rollback
+        run: |
+          kubectl get pods -n ${{ env.NAMESPACE_PRODUCTION }} -l app=msft-agent
+          kubectl describe deployment msft-agent -n ${{ env.NAMESPACE_PRODUCTION }} | grep Image

@@ -1,0 +1,255 @@
+# =============================================================================
+# Deployment - Main application workload
+# =============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: msft-agent
+  namespace: msft-agent
+  labels:
+    app.kubernetes.io/name: msft-agent
+    app.kubernetes.io/component: agent
+    app.kubernetes.io/version: "1.0.0"
+spec:
+  replicas: 3
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app: msft-agent
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: msft-agent
+        app.kubernetes.io/name: msft-agent
+        app.kubernetes.io/component: agent
+      annotations:
+        # Force rollout on config changes
+        checksum/config: "{{ include (print $.Template.BasePath \"/configmap.yaml\") . | sha256sum }}"
+    spec:
+      serviceAccountName: msft-agent
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+
+      # Spread pods across zones for high availability
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: msft-agent
+                topologyKey: topology.kubernetes.io/zone
+            - weight: 50
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: msft-agent
+                topologyKey: kubernetes.io/hostname
+
+      # Tolerate spot/preemptible nodes (optional)
+      # tolerations:
+      #   - key: "kubernetes.azure.com/scalesetpriority"
+      #     operator: "Equal"
+      #     value: "spot"
+      #     effect: "NoSchedule"
+
+      containers:
+        - name: agent
+          image: myregistry.azurecr.io/msft-agent:v1.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+
+          # Load configuration from ConfigMap and Secret
+          envFrom:
+            - configMapRef:
+                name: msft-agent-config
+            - secretRef:
+                name: msft-agent-secrets
+
+          # Resource requests and limits
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+
+          # Health probes
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+            successThreshold: 1
+
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+            successThreshold: 1
+
+          startupProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 30  # 30 * 5s = 150s max startup time
+
+          # Security context (container level)
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+
+          # Volume mounts
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: cache
+              mountPath: /.cache
+
+          # Graceful shutdown
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - sleep 10
+
+      # Graceful termination period
+      terminationGracePeriodSeconds: 60
+
+      # Volumes
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: cache
+          emptyDir: {}
+
+      # Optional: Pull from private registry
+      # imagePullSecrets:
+      #   - name: acr-secret
+---
+# =============================================================================
+# ServiceAccount - For workload identity
+# =============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: msft-agent
+  namespace: msft-agent
+  labels:
+    app.kubernetes.io/name: msft-agent
+  annotations:
+    # Azure Workload Identity (AKS)
+    # azure.workload.identity/client-id: "your-managed-identity-client-id"
+    #
+    # AWS IAM Roles for Service Accounts (EKS)
+    # eks.amazonaws.com/role-arn: "arn:aws:iam::123456789:role/msft-agent-role"
+    #
+    # GKE Workload Identity
+    # iam.gke.io/gcp-service-account: "msft-agent@project.iam.gserviceaccount.com"
+---
+# =============================================================================
+# Role - Permissions within the namespace
+# =============================================================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: msft-agent
+  namespace: msft-agent
+  labels:
+    app.kubernetes.io/name: msft-agent
+rules:
+  # Allow reading ConfigMaps (for configuration)
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
+
+  # Allow reading Secrets (for credentials - limit by name if possible)
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["msft-agent-secrets"]
+    verbs: ["get"]
+
+  # Allow reading/updating own pod status (for health reporting)
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+
+  # Allow creating events (for auditing and debugging)
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+
+  # Coordination for leader election (if needed for singleton operations)
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+---
+# =============================================================================
+# RoleBinding - Bind Role to ServiceAccount
+# =============================================================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: msft-agent
+  namespace: msft-agent
+  labels:
+    app.kubernetes.io/name: msft-agent
+subjects:
+  - kind: ServiceAccount
+    name: msft-agent
+    namespace: msft-agent
+roleRef:
+  kind: Role
+  name: msft-agent
+  apiGroup: rbac.authorization.k8s.io
+---
+# =============================================================================
+# PodDisruptionBudget - Ensure availability during disruptions
+# =============================================================================
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: msft-agent
+  namespace: msft-agent
+  labels:
+    app.kubernetes.io/name: msft-agent
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: msft-agent

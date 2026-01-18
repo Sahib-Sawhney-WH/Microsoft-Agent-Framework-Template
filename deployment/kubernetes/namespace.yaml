@@ -1,0 +1,16 @@
+# =============================================================================
+# Namespace - Isolates the agent workloads
+# =============================================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: msft-agent
+  labels:
+    app.kubernetes.io/name: msft-agent
+    app.kubernetes.io/part-of: ai-platform
+    app.kubernetes.io/managed-by: kubectl
+    # Enable Pod Security Standards (Kubernetes 1.23+)
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
