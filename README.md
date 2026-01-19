@@ -270,7 +270,7 @@ We welcome contributions! Please see [Contributing Guide](docs/contributing/inde
 - Development setup
 - Code standards
 - Pull request process
-- Testing requirements
+- Testing requirement
 
 ## Requirements
 
